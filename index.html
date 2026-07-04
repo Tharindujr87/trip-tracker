@@ -77,6 +77,25 @@
           <div id="speeding-warning" class="speeding-overlay hide">SLOW DOWN</div>
         </div>
 
+        <!-- Dynamic G-Force Grid Crosshair Widget -->
+        <div class="gforce-widget" id="gforce-panel">
+          <span class="gforce-label">LIVE G-FORCE</span>
+          <div class="gforce-grid">
+            <div class="gforce-axis"><strong>LAT (X):</strong> <span id="g-lat">0.00 G</span></div>
+            <div class="gforce-axis"><strong>LONG (Y):</strong> <span id="g-long">0.00 G</span></div>
+            <div class="gforce-axis"><strong>VERT (Z):</strong> <span id="g-vert">1.00 G</span></div>
+            <div class="gforce-axis highlight-g"><strong>VECTOR:</strong> <span id="g-total">1.00 G</span></div>
+          </div>
+          <!-- Dynamic bubble crosshair display -->
+          <div class="gforce-crosshair-container">
+            <div class="crosshair-axis-x"></div>
+            <div class="crosshair-axis-y"></div>
+            <div class="crosshair-circle circle-1"></div>
+            <div class="crosshair-circle circle-2"></div>
+            <div class="crosshair-dot" id="gforce-dot"></div>
+          </div>
+        </div>
+
         <!-- Mode Configuration and Controls -->
         <div class="controls-card">
           <!-- Primary Action Buttons -->
@@ -89,6 +108,15 @@
 
           <!-- Configuration Switches -->
           <div class="settings-grid">
+            <div class="settings-row">
+              <label for="profile-toggle">Tracking Profile</label>
+              <select id="profile-toggle" class="select-box">
+                <option value="high-res" selected>Diagnostics (1s + Gs)</option>
+                <option value="standard">Standard Log (10s)</option>
+                <option value="distance">Smart Distance (15m)</option>
+              </select>
+            </div>
+
             <div class="settings-row">
               <label for="wake-lock-toggle">Keep Screen Awake</label>
               <label class="switch">
@@ -249,6 +277,9 @@
 
         <!-- Export Buttons -->
         <div class="modal-footer">
+          <button id="export-csv-btn" class="btn btn-secondary">
+            <span class="btn-icon">📊</span> EXPORT CSV (Excel)
+          </button>
           <button id="export-gpx-btn" class="btn btn-secondary">
             <span class="btn-icon">💾</span> EXPORT GPX
           </button>

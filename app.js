@@ -15,6 +15,9 @@ let previousFilteredAltitude = null;
 let lastSpeedLimit = null;
 let speedLimitRoadName = "";
 
+// Dynamic G-Force Tracker state
+let currentAccel = { x: 0, y: 0, z: 0, total: 1.0 }; // standard vert gravity default is 1.0G
+
 // Map variables
 let map = null;
 let activePolylineGroup = null;
@@ -26,6 +29,7 @@ let telemetryChart = null;
 
 // Settings & Config
 let settings = {
+  trackingProfile: 'high-res', // 'high-res', 'standard', 'distance'
   keepAwake: true,
   autoStart: false,
   autoStartThreshold: 10, // km/h
@@ -98,7 +102,6 @@ function getAllTripsFromDB() {
     const request = store.getAll();
     
     request.onsuccess = (e) => {
-      // Return sorted by date/id descending
       const trips = e.target.result || [];
       trips.sort((a, b) => b.id - a.id);
       resolve(trips);
@@ -145,7 +148,6 @@ function releaseWakeLock() {
   }
 }
 
-// Handle visibility change to re-acquire wake lock if tab is resumed
 document.addEventListener('visibilitychange', async () => {
   if (wakeLock !== null && document.visibilityState === 'visible') {
     await requestWakeLock();
@@ -167,8 +169,6 @@ function updateWakeStatus(isActive) {
 // -------------------------------------------------------------
 // Math and Calculations
 // -------------------------------------------------------------
-
-// Haversine formula to compute distance between points in meters
 function getDistance(lat1, lon1, lat2, lon2) {
   const R = 6371e3; // Earth radius in meters
   const phi1 = (lat1 * Math.PI) / 180;
@@ -223,14 +223,12 @@ async function fetchRoadSpeedLimit(lat, lon) {
   const now = Date.now();
   if (now - lastOsmQueryTime < OSM_QUERY_INTERVAL_MS) return;
   
-  // Also verify they moved at least 15 meters to prevent spamming queries
   const distMoved = getDistance(lastOsmCoords.lat, lastOsmCoords.lon, lat, lon);
   if (distMoved < 15 && lastOsmQueryTime !== 0) return;
 
   lastOsmQueryTime = now;
   lastOsmCoords = { lat, lon };
 
-  // Overpass QL query: Find ways within 30 meters of coordinates tagged as 'highway'
   const query = `[out:json];
     way(around:30, ${lat}, ${lon})[highway];
     out tags;`;
@@ -242,11 +240,9 @@ async function fetchRoadSpeedLimit(lat, lon) {
     
     const data = await response.json();
     if (data && data.elements && data.elements.length > 0) {
-      // Find the closest/most descriptive road way
       const ways = data.elements;
       let targetWay = ways[0];
       
-      // Prefer ways with explicit maxspeed tag
       const withSpeed = ways.find(w => w.tags && w.tags.maxspeed);
       if (withSpeed) {
         targetWay = withSpeed;
@@ -260,25 +256,21 @@ async function fetchRoadSpeedLimit(lat, lon) {
         let parsedLimit = parseInt(rawLimit, 10);
         
         if (rawLimit.includes('mph')) {
-          // If unit is mph, convert or keep based on selection
           if (settings.units === 'metric') {
-            lastSpeedLimit = Math.round(parsedLimit * 1.60934); // mph -> km/h
+            lastSpeedLimit = Math.round(parsedLimit * 1.60934);
           } else {
             lastSpeedLimit = parsedLimit;
           }
         } else {
-          // Default Overpass maxspeed tags are usually in km/h unless specified
           if (settings.units === 'imperial') {
-            lastSpeedLimit = Math.round(parsedLimit * 0.621371); // km/h -> mph
+            lastSpeedLimit = Math.round(parsedLimit * 0.621371);
           } else {
             lastSpeedLimit = parsedLimit;
           }
         }
       } else if (tags.highway) {
-        // Fallback speed limit based on highway type (Standard European/Global classifications)
         const highwayTypes = {
           motorway: 110,
-          trunk: 90,
           primary: 80,
           secondary: 70,
           tertiary: 50,
@@ -302,7 +294,79 @@ async function fetchRoadSpeedLimit(lat, lon) {
     }
   } catch (err) {
     console.warn("OSM speed limit fetch failed:", err);
-    // Silent fail to prevent tracking crash
+  }
+}
+
+// -------------------------------------------------------------
+// Accelerometer & G-Force Listeners
+// -------------------------------------------------------------
+function initAccelerometer() {
+  if ('DeviceMotionEvent' in window) {
+    // Request permission if needed (iOS)
+    if (typeof DeviceMotionEvent.requestPermission === 'function') {
+      // Set click listener on body once to unlock permission (iOS standard)
+      const requestPermissionHandler = () => {
+        DeviceMotionEvent.requestPermission()
+          .then(permissionState => {
+            if (permissionState === 'granted') {
+              console.log("DeviceMotion permissions granted on iOS");
+              window.removeEventListener('click', requestPermissionHandler);
+            }
+          })
+          .catch(err => console.warn("Permission dialog failed:", err));
+      };
+      window.addEventListener('click', requestPermissionHandler);
+    }
+
+    // Bind sensor listener
+    window.addEventListener('devicemotion', (event) => {
+      const acc = event.accelerationIncludingGravity || event.acceleration;
+      if (!acc) return;
+
+      // Extract raw values
+      let rX = acc.x || 0;
+      let rY = acc.y || 0;
+      let rZ = acc.z || 0;
+
+      // Low-pass filter (rolling average, alpha = 0.15) to damp vehicle structural vibration
+      const smoothing = 0.15;
+      currentAccel.x = (smoothing * rX) + ((1 - smoothing) * currentAccel.x);
+      currentAccel.y = (smoothing * rY) + ((1 - smoothing) * currentAccel.y);
+      currentAccel.z = (smoothing * rZ) + ((1 - smoothing) * currentAccel.z);
+
+      // Convert to G-Forces (1G = 9.80665 m/s2)
+      // Normal gravity acts on Z axis (if device is flat on dashboard)
+      const gX = currentAccel.x / 9.80665;
+      const gY = currentAccel.y / 9.80665;
+      const gZ = currentAccel.z / 9.80665;
+      const gTotal = Math.sqrt(gX * gX + gY * gY + gZ * gZ);
+
+      currentAccel.total = gTotal;
+
+      // Render live values
+      document.getElementById('g-lat').textContent = `${gX.toFixed(2)} G`;
+      document.getElementById('g-long').textContent = `${gY.toFixed(2)} G`;
+      document.getElementById('g-vert').textContent = `${gZ.toFixed(2)} G`;
+      document.getElementById('g-total').textContent = `${gTotal.toFixed(2)} G`;
+
+      // Visual crosshair displacement mapping
+      // Maps standard -1.2G to +1.2G ranges onto outer boundaries
+      const maxGScale = 1.2;
+      const displacementMaxPx = 55;
+
+      const deltaX = Math.max(-1, Math.min(1, gX / maxGScale)) * displacementMaxPx;
+      // Invert Y direction so braking (deceleration) tilts forward/upwards
+      const deltaY = Math.max(-1, Math.min(1, -gY / maxGScale)) * displacementMaxPx;
+
+      const dot = document.getElementById('gforce-dot');
+      if (dot) {
+        dot.style.left = `calc(50% + ${deltaX}px)`;
+        dot.style.top = `calc(50% + ${deltaY}px)`;
+      }
+    });
+  } else {
+    console.warn("DeviceMotionEvent not supported on this platform.");
+    document.getElementById('gforce-panel').style.opacity = '0.5';
   }
 }
 
@@ -314,7 +378,6 @@ function handleGPSUpdate(position) {
   const accuracy = coords.accuracy;
   const currentTimestamp = position.timestamp;
 
-  // Filter out updates with terrible accuracy (> 50m) to protect from GPS jumps
   if (accuracy > 50) {
     updateGPSBadge(false, `LOW ACCURACY (${Math.round(accuracy)}m)`);
     return;
@@ -325,10 +388,7 @@ function handleGPSUpdate(position) {
   const currentLat = coords.latitude;
   const currentLon = coords.longitude;
   
-  // Speed calculation: Use coords.speed (m/s) if valid, otherwise compute from delta
   let speedMps = (coords.speed !== null && coords.speed >= 0) ? coords.speed : 0;
-  
-  // Parse altitude and apply Exponential Moving Average (EMA) filtering
   let rawAltitude = coords.altitude !== null ? coords.altitude : 0;
   let filteredAltitude = rawAltitude;
   
@@ -345,54 +405,42 @@ function handleGPSUpdate(position) {
 
   if (tripCoords.length > 0) {
     const lastPt = tripCoords[tripCoords.length - 1];
-    
-    // Calculate distance since last point
     stepDistance = getDistance(lastPt.lat, lastPt.lon, currentLat, currentLon);
-    
-    // Time delta in seconds
     const timeDelta = (currentTimestamp - lastPt.time) / 1000;
     
-    // Fallback speed calculation if native coords.speed is zero or invalid
     if ((coords.speed === null || coords.speed <= 0.1) && stepDistance > 1 && timeDelta > 0) {
       speedMps = stepDistance / timeDelta;
     }
 
     if (isTracking) {
-      // Accumulate total distance
       totalDistance += stepDistance;
       
-      // Calculate altitude gain
       if (coords.altitude !== null && previousFilteredAltitude !== null) {
         const altitudeDelta = filteredAltitude - previousFilteredAltitude;
         if (altitudeDelta > 0) {
           totalElevationGain += altitudeDelta;
         }
         
-        // Calculate incline slope: elevation delta / horizontal distance * 100
-        // Use a minimum distance (e.g. 8m) to avoid massive noise fluctuations
         if (stepDistance > 8) {
           computedIncline = (altitudeDelta / stepDistance) * 100;
-          // Clamp incline to realistic slopes
           computedIncline = Math.max(-40, Math.min(40, computedIncline));
           if (Math.abs(computedIncline) > Math.abs(maxIncline)) {
             maxIncline = computedIncline;
           }
         } else {
-          computedIncline = lastPt.incline || 0; // carry over
+          computedIncline = lastPt.incline || 0;
         }
       }
     }
   }
 
-  // Update speed records
   if (speedMps > maxSpeed && isTracking) {
     maxSpeed = speedMps;
   }
 
-  // Check Road Speed Limits
   fetchRoadSpeedLimit(currentLat, currentLon);
 
-  // Package current waypoint
+  // Compile coordinate log packet with G-Force parameters
   const currentWaypoint = {
     lat: currentLat,
     lon: currentLon,
@@ -402,22 +450,53 @@ function handleGPSUpdate(position) {
     rawAltitude: rawAltitude,
     incline: computedIncline,
     speedLimit: lastSpeedLimit,
-    roadName: speedLimitRoadName
+    roadName: speedLimitRoadName,
+    // Add real-time G-Forces recorded at time of position trigger
+    gx: currentAccel.x / 9.80665,
+    gy: currentAccel.y / 9.80665,
+    gz: currentAccel.z / 9.80665,
+    gtotal: currentAccel.total
   };
 
   previousFilteredAltitude = filteredAltitude;
 
-  // Render values to UI immediately
   updateLiveUI(currentWaypoint);
 
-  // If tracking is active, store coordinate and update map/charts
   if (isTracking) {
-    tripCoords.push(currentWaypoint);
-    addPointToMap(currentWaypoint);
-    addPointToCharts(currentWaypoint);
+    // Apply Tracking Profile constraints to determine if we should write this point
+    if (shouldLogPoint(currentWaypoint)) {
+      tripCoords.push(currentWaypoint);
+      addPointToMap(currentWaypoint);
+      addPointToCharts(currentWaypoint);
+    }
   } else {
-    // Auto start check when idle
     handleAutoStartCheck(speedMps);
+  }
+}
+
+// Enforces dynamic logging resolutions
+function shouldLogPoint(newPt) {
+  if (tripCoords.length === 0) return true;
+  
+  const lastPt = tripCoords[tripCoords.length - 1];
+  const timeDeltaMs = newPt.time - lastPt.time;
+  
+  switch (settings.trackingProfile) {
+    case 'high-res':
+      // Diagnostics mode: record at high frequency (~1 second)
+      return timeDeltaMs >= 900; 
+      
+    case 'standard':
+      // Standard trip tracking: record at low frequency (~10 seconds)
+      return timeDeltaMs >= 9500;
+      
+    case 'distance':
+      // Smart distance: record when displacement exceeds 15 meters
+      const displacement = getDistance(lastPt.lat, lastPt.lon, newPt.lat, newPt.lon);
+      return displacement >= 15;
+      
+    default:
+      return true;
   }
 }
 
@@ -449,13 +528,11 @@ function handleAutoStartCheck(speedMps) {
   
   if (currentSpeedKmh >= thresholdKmh) {
     autoStartTriggerPoints++;
-    // Must exceed threshold for 3 consecutive GPS updates (~3-5 seconds)
     if (autoStartTriggerPoints >= 3) {
       console.log(`Auto-start triggered at speed: ${currentSpeedKmh.toFixed(1)} km/h`);
       toggleTracking();
     }
   } else {
-    // Reset points on slow down
     autoStartTriggerPoints = 0;
   }
 }
@@ -467,17 +544,11 @@ function updateLiveUI(pt) {
   const displaySpeed = convertSpeed(pt.speed);
   document.getElementById('current-speed').textContent = Math.round(displaySpeed);
 
-  // Speedometer circular gauge calculation
-  // Base circle circumference: stroke-dasharray = 353 (112px path)
-  // Arc represents 0 to 140 km/h (or 90 mph)
   const maxScale = settings.units === 'imperial' ? 90 : 140;
   const fillPct = Math.min(100, (displaySpeed / maxScale) * 100);
-  // Calculate dash offset: 353 = empty, 0 = full (but arc is 75% of a full circle)
-  // Active arc length is approx 353
   const offset = 353 - (353 * (fillPct / 100));
   document.getElementById('speed-progress').style.strokeDashoffset = offset;
 
-  // Handle speed limits and warning flash
   const limitBox = document.getElementById('speed-limit-display');
   const warningOverlay = document.getElementById('speeding-warning');
   
@@ -485,13 +556,11 @@ function updateLiveUI(pt) {
     limitBox.classList.remove('hide');
     document.getElementById('speed-limit-val').textContent = pt.speedLimit;
     
-    // Warning trigger (5% threshold buffer above speed limit)
     if (displaySpeed > pt.speedLimit * 1.05) {
       warningOverlay.classList.remove('hide');
       document.getElementById('speed-progress').style.stroke = 'var(--accent-red)';
     } else {
       warningOverlay.classList.add('hide');
-      // Dynamic color depending on acceleration or safe speeds
       document.getElementById('speed-progress').style.stroke = 'var(--accent-cyan)';
     }
   } else {
@@ -500,27 +569,18 @@ function updateLiveUI(pt) {
     document.getElementById('speed-progress').style.stroke = 'var(--accent-cyan)';
   }
 
-  // Update stat widgets (if currently tracking)
   if (isTracking) {
     const formattedDistance = convertDistance(totalDistance);
     const speedUnit = settings.units === 'imperial' ? 'mph' : 'km/h';
     const distUnit = settings.units === 'imperial' ? 'mi' : 'km';
     const elevUnit = settings.units === 'imperial' ? 'ft' : 'm';
 
-    // Duration timer is updated on secondary interval (timerInterval)
     document.getElementById('stat-distance').innerHTML = `${formattedDistance.toFixed(2)} <span class="sub-unit">${distUnit}</span>`;
     
-    // Average Speed
     const avgSpeedMps = elapsedSeconds > 0 ? (totalDistance / elapsedSeconds) : 0;
     document.getElementById('stat-avg-speed').innerHTML = `${convertSpeed(avgSpeedMps).toFixed(1)} <span class="sub-unit">${speedUnit}</span>`;
-    
-    // Max Speed
     document.getElementById('stat-max-speed').innerHTML = `${convertSpeed(maxSpeed).toFixed(1)} <span class="sub-unit">${speedUnit}</span>`;
-    
-    // Incline
     document.getElementById('stat-incline').innerHTML = `${pt.incline.toFixed(1)} <span class="sub-unit">%</span>`;
-    
-    // Elevation Gain
     document.getElementById('stat-elevation').innerHTML = `${Math.round(convertElevation(totalElevationGain))} <span class="sub-unit">${elevUnit}</span>`;
   }
 }
@@ -532,7 +592,6 @@ async function toggleTracking() {
   const btn = document.getElementById('track-btn');
   
   if (!isTracking) {
-    // Start tracking
     isTracking = true;
     startTime = Date.now();
     elapsedSeconds = 0;
@@ -547,26 +606,21 @@ async function toggleTracking() {
     btn.className = 'btn btn-primary btn-stop';
     btn.innerHTML = `<span class="btn-icon">■</span><span class="btn-text">STOP TRIP</span>`;
 
-    // Initialize map track layers
     if (activePolylineGroup) {
       activePolylineGroup.clearLayers();
     }
     
-    // Reset Telemetry Charts
     resetCharts();
 
-    // Trigger timer interval
     timerInterval = setInterval(() => {
       elapsedSeconds++;
       document.getElementById('stat-duration').textContent = formatDuration(elapsedSeconds);
     }, 1000);
 
-    // Request Wake Lock
     await requestWakeLock();
     
-    console.log("Trip tracking started...");
+    console.log(`Trip started under resolution profile: ${settings.trackingProfile}`);
   } else {
-    // Stop tracking
     isTracking = false;
     clearInterval(timerInterval);
     releaseWakeLock();
@@ -576,7 +630,6 @@ async function toggleTracking() {
 
     console.log("Trip tracking stopped.");
     
-    // If we have actual tracking data, save to DB
     if (tripCoords.length > 2 && totalDistance > 5) {
       const newTrip = {
         id: startTime,
@@ -587,19 +640,18 @@ async function toggleTracking() {
         maxSpeed: maxSpeed,
         elevationGain: totalElevationGain,
         maxIncline: maxIncline,
+        trackingProfile: settings.trackingProfile,
         coords: tripCoords
       };
       
       await saveTripToDB(newTrip);
       await loadTripHistory();
       
-      // Open modal summary for the user to review
       openTripModal(newTrip);
     } else {
       alert("Trip was too short to record.");
     }
 
-    // Reset fields
     document.getElementById('stat-duration').textContent = "00:00:00";
     document.getElementById('stat-distance').textContent = `0.00 ${settings.units === 'imperial' ? 'mi' : 'km'}`;
     document.getElementById('stat-avg-speed').textContent = `0.0 ${settings.units === 'imperial' ? 'mph' : 'km/h'}`;
@@ -613,13 +665,11 @@ async function toggleTracking() {
 // Interactive Maps (Leaflet.js)
 // -------------------------------------------------------------
 function initMap() {
-  // Leaflet initialization
   map = L.map('map', {
     zoomControl: true,
     attributionControl: true
   }).setView([0, 0], 2);
 
-  // High premium dark-mode tiles (CartoDB Dark Matter)
   L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
     subdomains: 'abcd',
@@ -628,7 +678,6 @@ function initMap() {
 
   activePolylineGroup = L.featureGroup().addTo(map);
 
-  // Custom User Marker containing directional arrow
   const pulseIcon = L.divIcon({
     className: 'custom-pulse-marker',
     html: `<div class="pulse-ring"></div><div class="pulse-dot"></div>`,
@@ -638,12 +687,9 @@ function initMap() {
   
   userMarker = L.marker([0, 0], { icon: pulseIcon }).addTo(map);
   
-  // Custom CSS for pulse marker (appended to head)
   const style = document.createElement('style');
   style.innerHTML = `
-    .custom-pulse-marker {
-      position: relative;
-    }
+    .custom-pulse-marker { position: relative; }
     .pulse-ring {
       border: 3px solid var(--accent-cyan);
       border-radius: 50%;
@@ -674,7 +720,6 @@ function initMap() {
   `;
   document.head.appendChild(style);
 
-  // Map behavior
   map.on('dragstart', () => {
     mapCentered = false;
   });
@@ -690,38 +735,28 @@ function addPointToMap(pt) {
     map.setView(latLng, 16);
   }
 
-  // Draw segment on active map. We color code based on speed variations:
-  // Speed variations logic: compare speed limit if available, or just absolute speeds
-  // Green: Speed < 30km/h (slow/city/climb) or below speed limit
-  // Yellow/Orange: Speed between 30 and 70km/h or accelerating
-  // Red: Speed > 70km/h or exceeding speed limit
   if (tripCoords.length > 1) {
     const prevPt = tripCoords[tripCoords.length - 2];
     const prevLatLng = [prevPt.lat, prevPt.lon];
     
-    let segmentColor = 'var(--accent-cyan)'; // cyan as normal/idle
+    let segmentColor = 'var(--accent-cyan)';
     const currentKmh = pt.speed * 3.6;
     
     if (pt.speedLimit !== null) {
       if (currentKmh > pt.speedLimit * 1.05) {
-        segmentColor = 'var(--accent-red)'; // Speeding
-      } else if (currentKmh > pt.speedLimit * 0.8) {
-        segmentColor = 'var(--accent-orange)'; // Fast/close to limit
-      } else {
-        segmentColor = 'var(--accent-green)'; // Safe speed
-      }
-    } else {
-      // General fallbacks if no road speed limit is retrieved
-      if (currentKmh > 80) {
         segmentColor = 'var(--accent-red)';
-      } else if (currentKmh > 40) {
+      } else if (currentKmh > pt.speedLimit * 0.8) {
         segmentColor = 'var(--accent-orange)';
-      } else if (currentKmh > 3) {
+      } else {
         segmentColor = 'var(--accent-green)';
       }
+    } else {
+      if (currentKmh > 80) segmentColor = 'var(--accent-red)';
+      else if (currentKmh > 40) segmentColor = 'var(--accent-orange)';
+      else if (currentKmh > 3) segmentColor = 'var(--accent-green)';
     }
 
-    const poly = L.polyline([prevLatLng, latLng], {
+    L.polyline([prevLatLng, latLng], {
       color: segmentColor,
       weight: 6,
       opacity: 0.9,
@@ -736,7 +771,6 @@ function addPointToMap(pt) {
 function initCharts() {
   const ctx = document.getElementById('telemetryChart').getContext('2d');
   
-  // Custom dark styles config for chart
   telemetryChart = new Chart(ctx, {
     type: 'line',
     data: {
@@ -781,23 +815,13 @@ function initCharts() {
           ticks: { color: '#8c9cb2', font: { family: 'Outfit' } }
         },
         y: {
-          title: {
-            display: true,
-            text: 'Speed',
-            color: '#00f2fe',
-            font: { family: 'Outfit', weight: 600 }
-          },
+          title: { display: true, text: 'Speed', color: '#00f2fe', font: { family: 'Outfit', weight: 600 } },
           grid: { color: 'rgba(255, 255, 255, 0.03)' },
           ticks: { color: '#8c9cb2', font: { family: 'Outfit' } },
           position: 'left'
         },
         y1: {
-          title: {
-            display: true,
-            text: 'Altitude',
-            color: '#7f00ff',
-            font: { family: 'Outfit', weight: 600 }
-          },
+          title: { display: true, text: 'Altitude', color: '#7f00ff', font: { family: 'Outfit', weight: 600 } },
           grid: { drawOnChartArea: false },
           ticks: { color: '#8c9cb2', font: { family: 'Outfit' } },
           position: 'right'
@@ -827,14 +851,13 @@ function addPointToCharts(pt) {
   telemetryChart.data.datasets[0].data.push(displaySpeed);
   telemetryChart.data.datasets[1].data.push(displayElev);
 
-  // Keep dynamic window size of 50 points on graph to maintain responsiveness
   if (telemetryChart.data.labels.length > 50) {
     telemetryChart.data.labels.shift();
     telemetryChart.data.datasets[0].data.shift();
     telemetryChart.data.datasets[1].data.shift();
   }
 
-  telemetryChart.update('none'); // silent update
+  telemetryChart.update('none');
 }
 
 // -------------------------------------------------------------
@@ -860,6 +883,7 @@ async function loadTripHistory() {
     const formattedDistance = convertDistance(trip.distance);
     const speedUnit = settings.units === 'imperial' ? 'mph' : 'km/h';
     const distUnit = settings.units === 'imperial' ? 'mi' : 'km';
+    const profileTag = trip.trackingProfile === 'high-res' ? 'DIAGNOSTIC (1s)' : (trip.trackingProfile === 'standard' ? 'LOG (10s)' : 'SMART (15m)');
 
     const card = document.createElement('div');
     card.className = 'trip-card';
@@ -869,6 +893,7 @@ async function loadTripHistory() {
         <span class="trip-date">${trip.date}</span>
         <span class="trip-duration-tag">${formatDuration(trip.duration)}</span>
       </div>
+      <div style="font-size: 0.65rem; color: var(--accent-purple); font-weight: 800; margin-top: -8px;">${profileTag}</div>
       <div class="trip-card-stats">
         <div class="trip-card-stat">
           <span class="trip-card-label">DISTANCE</span>
@@ -902,7 +927,6 @@ function openTripModal(trip) {
   const modal = document.getElementById('trip-modal');
   document.getElementById('modal-trip-title').textContent = `Trip Details - ${trip.date}`;
   
-  // Format metric vs imperial values
   const formattedDistance = convertDistance(trip.distance);
   const displayAvgSpeed = convertSpeed(trip.avgSpeed);
   const displayMaxSpeed = convertSpeed(trip.maxSpeed);
@@ -919,7 +943,6 @@ function openTripModal(trip) {
   
   modal.classList.add('show');
 
-  // Load Map & Charts inside modal asynchronously after rendering
   setTimeout(() => {
     renderModalMap(trip);
     renderModalChart(trip);
@@ -955,7 +978,6 @@ function renderModalMap(trip) {
 
   const coords = trip.coords.map(c => [c.lat, c.lon]);
   
-  // Render speed segments
   for (let i = 1; i < trip.coords.length; i++) {
     const pt = trip.coords[i];
     const prevPt = trip.coords[i - 1];
@@ -987,7 +1009,6 @@ function renderModalMap(trip) {
     }).addTo(modalMap);
   }
 
-  // Draw markers at start and end
   if (coords.length > 0) {
     const greenDot = L.divIcon({
       html: `<div style="background-color: var(--accent-green); width: 12px; height: 12px; border-radius:50%; border:2px solid #fff; box-shadow: 0 0 6px var(--accent-green);"></div>`,
@@ -1082,7 +1103,7 @@ function renderModalChart(trip) {
 }
 
 // -------------------------------------------------------------
-// Data Exporters (GPX / JSON)
+// Data Exporters (GPX / JSON / CSV)
 // -------------------------------------------------------------
 function exportToGPX(trip) {
   let gpx = `<?xml version="1.0" encoding="UTF-8"?>
@@ -1106,6 +1127,9 @@ function exportToGPX(trip) {
           <speed>${pt.speed.toFixed(3)}</speed>
           <incline>${pt.incline.toFixed(2)}</incline>
           <speedlimit>${pt.speedLimit !== null ? pt.speedLimit : ''}</speedlimit>
+          <gx>${pt.gx !== undefined ? pt.gx.toFixed(3) : ''}</gx>
+          <gy>${pt.gy !== undefined ? pt.gy.toFixed(3) : ''}</gy>
+          <gz>${pt.gz !== undefined ? pt.gz.toFixed(3) : ''}</gz>
         </extensions>
       </trkpt>
 `;
@@ -1121,6 +1145,52 @@ function exportToGPX(trip) {
 function exportToJSON(trip) {
   const jsonStr = JSON.stringify(trip, null, 2);
   downloadFile(jsonStr, `trip_${trip.id}.json`, 'application/json');
+}
+
+// Vehicle Diagnostics Excel-compatible CSV export generator
+function exportToCSV(trip) {
+  const speedUnit = settings.units === 'imperial' ? 'mph' : 'km/h';
+  const elevUnit = settings.units === 'imperial' ? 'ft' : 'm';
+  
+  let csv = `Trip Date,${trip.date}\n`;
+  csv += `Trip ID,${trip.id}\n`;
+  csv += `Duration,${formatDuration(trip.duration)}\n`;
+  csv += `Tracking Resolution Profile,${trip.trackingProfile || 'N/A'}\n`;
+  csv += `Total Distance (${settings.units === 'imperial' ? 'mi' : 'km'}),${convertDistance(trip.distance).toFixed(3)}\n\n`;
+  
+  // Tabular column headers
+  csv += `Timestamp,Date,Elapsed_Time_Sec,Speed_${speedUnit},Speed_Limit_${speedUnit},Road_Name,Acceleration_GPS_mps2,Incline_Pct,Altitude_${elevUnit},G_Force_Lateral_X,G_Force_Longitudinal_Y,G_Force_Vertical_Z,G_Force_Vector\n`;
+  
+  trip.coords.forEach((pt, idx) => {
+    const elapsed = Math.round((pt.time - trip.id) / 1000);
+    const dateStr = new Date(pt.time).toLocaleTimeString();
+    const speedVal = convertSpeed(pt.speed).toFixed(2);
+    const speedLimit = pt.speedLimit !== null ? pt.speedLimit : '';
+    const road = pt.roadName ? `"${pt.roadName.replace(/"/g, '""')}"` : 'Unknown';
+    const inclineVal = pt.incline.toFixed(2);
+    const elevVal = convertElevation(pt.altitude).toFixed(2);
+    
+    // GPS acceleration derivative dv/dt
+    let gpsAccel = 0;
+    if (idx > 0) {
+      const prev = trip.coords[idx - 1];
+      const dv = pt.speed - prev.speed;
+      const dt = (pt.time - prev.time) / 1000;
+      if (dt > 0) {
+        gpsAccel = dv / dt;
+      }
+    }
+    
+    // Accelerometer values
+    const gx = pt.gx !== undefined ? pt.gx.toFixed(3) : '0.000';
+    const gy = pt.gy !== undefined ? pt.gy.toFixed(3) : '0.000';
+    const gz = pt.gz !== undefined ? pt.gz.toFixed(3) : '1.000';
+    const gtotal = pt.gtotal !== undefined ? pt.gtotal.toFixed(3) : '1.000';
+    
+    csv += `${pt.time},${dateStr},${elapsed},${speedVal},${speedLimit},${road},${gpsAccel.toFixed(3)},${inclineVal},${elevVal},${gx},${gy},${gz},${gtotal}\n`;
+  });
+  
+  downloadFile(csv, `trip_diagnostics_${trip.id}.csv`, 'text/csv');
 }
 
 function downloadFile(content, fileName, contentType) {
@@ -1146,7 +1216,10 @@ window.addEventListener('DOMContentLoaded', async () => {
   initMap();
   initCharts();
 
-  // 4. Geolocation Engine launch
+  // 4. Setup Accelerometer sensor
+  initAccelerometer();
+
+  // 5. Geolocation Engine launch
   if ('geolocation' in navigator) {
     watchId = navigator.geolocation.watchPosition(
       handleGPSUpdate,
@@ -1162,16 +1235,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     alert("Geolocation is required for this application to function.");
   }
 
-  // 5. Button Listeners
+  // 6. Button Listeners
   document.getElementById('track-btn').addEventListener('click', toggleTracking);
   
-  // UI Tabs switching
   document.getElementById('tab-map').addEventListener('click', (e) => {
     document.getElementById('tab-map').classList.add('active');
     document.getElementById('tab-charts').classList.remove('active');
     document.getElementById('map-container').classList.add('active');
     document.getElementById('charts-container').classList.remove('active');
-    // Leaflet map refresh size on toggle
     if (map) map.invalidateSize();
   });
 
@@ -1183,6 +1254,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Settings switches
+  document.getElementById('profile-toggle').addEventListener('change', (e) => {
+    settings.trackingProfile = e.target.value;
+    console.log(`Resolution profile switched to: ${settings.trackingProfile}`);
+  });
+
   document.getElementById('wake-lock-toggle').addEventListener('change', (e) => {
     settings.keepAwake = e.target.checked;
     if (!settings.keepAwake) {
@@ -1205,17 +1281,17 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   document.getElementById('units-toggle').addEventListener('change', async (e) => {
     settings.units = e.target.value;
-    
-    // Update speedometer unit label text
     document.getElementById('speed-unit-label').textContent = settings.units === 'imperial' ? 'mph' : 'km/h';
-    
-    // Reload history to refresh card displays
     await loadTripHistory();
   });
 
   // Modal actions
   document.getElementById('modal-close').addEventListener('click', closeTripModal);
   
+  document.getElementById('export-csv-btn').addEventListener('click', () => {
+    if (selectedModalTrip) exportToCSV(selectedModalTrip);
+  });
+
   document.getElementById('export-gpx-btn').addEventListener('click', () => {
     if (selectedModalTrip) exportToGPX(selectedModalTrip);
   });
@@ -1234,7 +1310,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Close modal when clicking background
   window.addEventListener('click', (e) => {
     const modal = document.getElementById('trip-modal');
     if (e.target === modal) {
@@ -1242,7 +1317,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // PWA Install Prompt Handler
   let deferredPrompt;
   window.addEventListener('beforeinstallprompt', (e) => {
     e.preventDefault();
@@ -1262,7 +1336,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  // Register PWA service worker
   if ('serviceWorker' in navigator) {
     try {
       await navigator.serviceWorker.register('sw.js');

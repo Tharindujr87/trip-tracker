@@ -13,6 +13,7 @@
   --accent-green: #39ff14;
   --accent-orange: #ff9f1c;
   --accent-red: #ff0055;
+  --accent-pink: #ff007f;
   
   --font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   
@@ -208,13 +209,8 @@ body {
 }
 
 .speed-ring-fill {
-  stroke: url(#speed-gradient);
-  transition: stroke-dashoffset 0.1s linear;
-}
-
-/* Injecting gradient to SVG programmatically via JS or fallback CSS */
-.speed-ring-fill {
   stroke: var(--accent-cyan);
+  transition: stroke-dashoffset 0.1s linear;
   filter: drop-shadow(0 0 6px var(--accent-cyan));
 }
 
@@ -306,6 +302,115 @@ body {
 
 .speeding-overlay.hide {
   display: none;
+}
+
+/* G-Force Dashboard Panel */
+.gforce-widget {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 16px;
+  padding: 16px;
+  border: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.gforce-label {
+  font-size: 0.75rem;
+  font-weight: 800;
+  color: var(--text-secondary);
+  letter-spacing: 1px;
+  align-self: flex-start;
+}
+
+.gforce-grid {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.gforce-axis {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.gforce-axis strong {
+  color: var(--text-primary);
+}
+
+.gforce-axis span {
+  font-weight: 800;
+  color: var(--accent-cyan);
+}
+
+.gforce-axis.highlight-g span {
+  color: var(--accent-pink);
+  text-shadow: 0 0 6px rgba(255, 0, 127, 0.3);
+}
+
+/* Crosshair display grid */
+.gforce-crosshair-container {
+  position: relative;
+  width: 130px;
+  height: 130px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(5, 8, 17, 0.5);
+  border-radius: 50%;
+  overflow: hidden;
+}
+
+.crosshair-axis-x {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.crosshair-axis-y {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.crosshair-circle {
+  position: absolute;
+  border: 1px dashed rgba(255, 255, 255, 0.08);
+  border-radius: 50%;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.crosshair-circle.circle-1 {
+  width: 65px;  /* represents 0.5 G */
+  height: 65px;
+}
+
+.crosshair-circle.circle-2 {
+  width: 130px; /* represents 1.0 G */
+  height: 130px;
+}
+
+.crosshair-dot {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background-color: var(--accent-pink);
+  border: 2px solid #fff;
+  border-radius: 50%;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  transition: all 0.08s ease-out;
+  box-shadow: 0 0 10px var(--accent-pink);
 }
 
 /* Dashboard configuration form */
@@ -754,7 +859,7 @@ input:checked + .slider:before {
 }
 
 .trip-card-label {
-  font-size: 0.6rem;
+  font-size: 0.65rem;
   font-weight: 800;
   color: var(--text-secondary);
   letter-spacing: 0.5px;
