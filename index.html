@@ -104,6 +104,10 @@
               <span class="btn-icon">▶</span>
               <span class="btn-text">START TRIP</span>
             </button>
+            <button id="mark-event-btn" class="btn btn-warning" style="display: none; margin-top: 12px;">
+              <span class="btn-icon">⚠</span>
+              <span class="btn-text">MARK POWER EVENT</span>
+            </button>
           </div>
 
           <!-- Configuration Switches -->
@@ -156,6 +160,17 @@
       <!-- Right Panel: Live Stats Cards & Dynamic Graph Panels -->
       <section class="panel stats-charts-section">
         
+        <!-- Live Diagnostics Alerts -->
+        <div id="alerts-panel" class="alerts-container hide">
+          <div class="alerts-header-bar">
+            <span class="alert-icon">⚡</span>
+            <span class="alert-title-text">DIAGNOSTIC ALERTS</span>
+          </div>
+          <div id="alerts-list" class="alerts-list">
+            <!-- Dynamic alerts go here -->
+          </div>
+        </div>
+
         <!-- Live Stat Cards Grid -->
         <div class="stats-grid">
           

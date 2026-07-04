@@ -15,6 +15,10 @@ let previousFilteredAltitude = null;
 let lastSpeedLimit = null;
 let speedLimitRoadName = "";
 
+// Diagnostic flags
+let pendingUserEvent = false;
+let activeAlerts = new Map(); // tracks current active alerts
+
 // Dynamic G-Force Tracker state
 let currentAccel = { x: 0, y: 0, z: 0, total: 1.0 }; // standard vert gravity default is 1.0G
 
@@ -302,9 +306,7 @@ async function fetchRoadSpeedLimit(lat, lon) {
 // -------------------------------------------------------------
 function initAccelerometer() {
   if ('DeviceMotionEvent' in window) {
-    // Request permission if needed (iOS)
     if (typeof DeviceMotionEvent.requestPermission === 'function') {
-      // Set click listener on body once to unlock permission (iOS standard)
       const requestPermissionHandler = () => {
         DeviceMotionEvent.requestPermission()
           .then(permissionState => {
@@ -318,24 +320,19 @@ function initAccelerometer() {
       window.addEventListener('click', requestPermissionHandler);
     }
 
-    // Bind sensor listener
     window.addEventListener('devicemotion', (event) => {
       const acc = event.accelerationIncludingGravity || event.acceleration;
       if (!acc) return;
 
-      // Extract raw values
       let rX = acc.x || 0;
       let rY = acc.y || 0;
       let rZ = acc.z || 0;
 
-      // Low-pass filter (rolling average, alpha = 0.15) to damp vehicle structural vibration
       const smoothing = 0.15;
       currentAccel.x = (smoothing * rX) + ((1 - smoothing) * currentAccel.x);
       currentAccel.y = (smoothing * rY) + ((1 - smoothing) * currentAccel.y);
       currentAccel.z = (smoothing * rZ) + ((1 - smoothing) * currentAccel.z);
 
-      // Convert to G-Forces (1G = 9.80665 m/s2)
-      // Normal gravity acts on Z axis (if device is flat on dashboard)
       const gX = currentAccel.x / 9.80665;
       const gY = currentAccel.y / 9.80665;
       const gZ = currentAccel.z / 9.80665;
@@ -343,19 +340,15 @@ function initAccelerometer() {
 
       currentAccel.total = gTotal;
 
-      // Render live values
       document.getElementById('g-lat').textContent = `${gX.toFixed(2)} G`;
       document.getElementById('g-long').textContent = `${gY.toFixed(2)} G`;
       document.getElementById('g-vert').textContent = `${gZ.toFixed(2)} G`;
       document.getElementById('g-total').textContent = `${gTotal.toFixed(2)} G`;
 
-      // Visual crosshair displacement mapping
-      // Maps standard -1.2G to +1.2G ranges onto outer boundaries
       const maxGScale = 1.2;
       const displacementMaxPx = 55;
 
       const deltaX = Math.max(-1, Math.min(1, gX / maxGScale)) * displacementMaxPx;
-      // Invert Y direction so braking (deceleration) tilts forward/upwards
       const deltaY = Math.max(-1, Math.min(1, -gY / maxGScale)) * displacementMaxPx;
 
       const dot = document.getElementById('gforce-dot');
@@ -440,7 +433,20 @@ function handleGPSUpdate(position) {
 
   fetchRoadSpeedLimit(currentLat, currentLon);
 
-  // Compile coordinate log packet with G-Force parameters
+  // Auto Diagnostics Processing (Phone-Sensor-Only)
+  let diagnosticAlert = "";
+  if (isTracking) {
+    diagnosticAlert = runAutoDiagnostics(speedMps, computedIncline, currentTimestamp);
+  }
+
+  let eventFlag = "";
+  if (pendingUserEvent) {
+    eventFlag = "USER_MARKED";
+    pendingUserEvent = false;
+    triggerUIConfirmation("EVENT MARKED successfully at GPS coordinate.");
+  }
+
+  // Compile coordinate log packet
   const currentWaypoint = {
     lat: currentLat,
     lon: currentLon,
@@ -451,11 +457,12 @@ function handleGPSUpdate(position) {
     incline: computedIncline,
     speedLimit: lastSpeedLimit,
     roadName: speedLimitRoadName,
-    // Add real-time G-Forces recorded at time of position trigger
     gx: currentAccel.x / 9.80665,
     gy: currentAccel.y / 9.80665,
     gz: currentAccel.z / 9.80665,
-    gtotal: currentAccel.total
+    gtotal: currentAccel.total,
+    userEvent: eventFlag,
+    diagnosticAlert: diagnosticAlert
   };
 
   previousFilteredAltitude = filteredAltitude;
@@ -463,15 +470,133 @@ function handleGPSUpdate(position) {
   updateLiveUI(currentWaypoint);
 
   if (isTracking) {
-    // Apply Tracking Profile constraints to determine if we should write this point
     if (shouldLogPoint(currentWaypoint)) {
       tripCoords.push(currentWaypoint);
       addPointToMap(currentWaypoint);
       addPointToCharts(currentWaypoint);
+      
+      // Update UI alerts list with any triggered flags
+      updateAlertsUI();
     }
   } else {
     handleAutoStartCheck(speedMps);
   }
+}
+
+// -------------------------------------------------------------
+// Auto-Diagnostics Logic (Sliding Window Analysis)
+// -------------------------------------------------------------
+function runAutoDiagnostics(currentSpeedMps, currentIncline, currentTimestamp) {
+  if (tripCoords.length < 5) return "";
+  
+  let flags = [];
+  
+  // Fetch coordinates recorded in the last 15 seconds
+  const fifteenSecsAgo = currentTimestamp - 15000;
+  const recentCoords = tripCoords.filter(c => c.time >= fifteenSecsAgo);
+  
+  if (recentCoords.length >= 3) {
+    const firstCoord = recentCoords[0];
+    const speedDeltaKmh = (currentSpeedMps - firstCoord.speed) * 3.6;
+    
+    // Average incline during this sliding window
+    const avgIncline = recentCoords.reduce((sum, c) => sum + c.incline, 0) / recentCoords.length;
+
+    // 1. Incline Deceleration (Depletion signature: slowing down while climbing uphill)
+    if (avgIncline > 1.8 && speedDeltaKmh < -6.0 && currentSpeedMps > 1.0) {
+      // Vehicle has dropped speed by > 6 km/h over the last 15s uphill climb
+      flags.push("INCLINE_DECEL");
+      activeAlerts.set("INCLINE_DECEL", {
+        msg: "PERFORMANCE: Decelerating on incline (Potential battery drain)",
+        time: new Date().toLocaleTimeString()
+      });
+    } else {
+      // Remove alert if no longer slowing down or incline flattened
+      if (currentIncline < 1.0 || speedDeltaKmh >= 0) {
+        activeAlerts.delete("INCLINE_DECEL");
+      }
+    }
+
+    // 2. Unexpected Propulsion Drop on Flat Terrain (Power loss without full stop)
+    if (Math.abs(avgIncline) < 1.0 && speedDeltaKmh < -12.0 && currentSpeedMps > 1.5) {
+      // Flat terrain speed drop > 12 km/h over 15s (without stopping)
+      flags.push("PROPULSION_DROP");
+      activeAlerts.set("PROPULSION_DROP", {
+        msg: "PROPULSION: Unexpected power loss on flat terrain",
+        time: new Date().toLocaleTimeString()
+      });
+    } else {
+      if (speedDeltaKmh >= 0) {
+        activeAlerts.delete("PROPULSION_DROP");
+      }
+    }
+  }
+
+  // 3. Unsafe Speed Delta (Rear-end risk alert)
+  if (lastSpeedLimit !== null) {
+    const limitMps = settings.units === 'imperial' ? (lastSpeedLimit / 2.23694) : (lastSpeedLimit / 3.6);
+    // Alert if traveling at least 40% below speed limit on high-speed roads (> 50 km/h)
+    if (limitMps > 13.8 && currentSpeedMps < limitMps * 0.60 && currentSpeedMps > 2.0) {
+      flags.push("SPEED_HAZARD");
+      activeAlerts.set("SPEED_HAZARD", {
+        msg: `SAFETY: Speed is 40%+ below limit on active road (Rear-end risk)`,
+        time: new Date().toLocaleTimeString()
+      });
+    } else {
+      activeAlerts.delete("SPEED_HAZARD");
+    }
+  }
+
+  return flags.join(';');
+}
+
+function updateAlertsUI() {
+  const panel = document.getElementById('alerts-panel');
+  const list = document.getElementById('alerts-list');
+  
+  if (activeAlerts.size === 0) {
+    panel.classList.add('hide');
+    return;
+  }
+  
+  panel.classList.remove('hide');
+  list.innerHTML = '';
+  
+  activeAlerts.forEach((val, key) => {
+    const item = document.createElement('div');
+    item.className = 'alert-item';
+    item.innerHTML = `
+      <span>${val.msg}</span>
+      <span class="alert-timestamp">${val.time}</span>
+    `;
+    list.appendChild(item);
+  });
+}
+
+function triggerUIConfirmation(msg) {
+  const panel = document.getElementById('alerts-panel');
+  const list = document.getElementById('alerts-list');
+  
+  panel.classList.remove('hide');
+  
+  const item = document.createElement('div');
+  item.className = 'alert-item';
+  item.style.borderLeftColor = 'var(--accent-green)';
+  item.innerHTML = `
+    <span style="color: var(--accent-green); font-weight: 800;">${msg}</span>
+    <span class="alert-timestamp">${new Date().toLocaleTimeString()}</span>
+  `;
+  
+  // Prepend to show on top
+  list.insertBefore(item, list.firstChild);
+  
+  // Slide up/fade out notice after 4 seconds
+  setTimeout(() => {
+    item.remove();
+    if (activeAlerts.size === 0 && list.children.length === 0) {
+      panel.classList.add('hide');
+    }
+  }, 4000);
 }
 
 // Enforces dynamic logging resolutions
@@ -483,15 +608,12 @@ function shouldLogPoint(newPt) {
   
   switch (settings.trackingProfile) {
     case 'high-res':
-      // Diagnostics mode: record at high frequency (~1 second)
       return timeDeltaMs >= 900; 
       
     case 'standard':
-      // Standard trip tracking: record at low frequency (~10 seconds)
       return timeDeltaMs >= 9500;
       
     case 'distance':
-      // Smart distance: record when displacement exceeds 15 meters
       const displacement = getDistance(lastPt.lat, lastPt.lon, newPt.lat, newPt.lon);
       return displacement >= 15;
       
@@ -590,6 +712,7 @@ function updateLiveUI(pt) {
 // -------------------------------------------------------------
 async function toggleTracking() {
   const btn = document.getElementById('track-btn');
+  const markBtn = document.getElementById('mark-event-btn');
   
   if (!isTracking) {
     isTracking = true;
@@ -602,9 +725,14 @@ async function toggleTracking() {
     tripCoords = [];
     previousFilteredAltitude = null;
     autoStartTriggerPoints = 0;
+    activeAlerts.clear();
+    document.getElementById('alerts-panel').classList.add('hide');
     
     btn.className = 'btn btn-primary btn-stop';
     btn.innerHTML = `<span class="btn-icon">■</span><span class="btn-text">STOP TRIP</span>`;
+    
+    // Display Event button during active tracking
+    markBtn.style.display = 'flex';
 
     if (activePolylineGroup) {
       activePolylineGroup.clearLayers();
@@ -624,9 +752,14 @@ async function toggleTracking() {
     isTracking = false;
     clearInterval(timerInterval);
     releaseWakeLock();
+    activeAlerts.clear();
+    document.getElementById('alerts-panel').classList.add('hide');
     
     btn.className = 'btn btn-primary btn-start';
     btn.innerHTML = `<span class="btn-icon">▶</span><span class="btn-text">START TRIP</span>`;
+    
+    // Hide event button
+    markBtn.style.display = 'none';
 
     console.log("Trip tracking stopped.");
     
@@ -740,20 +873,27 @@ function addPointToMap(pt) {
     const prevLatLng = [prevPt.lat, prevPt.lon];
     
     let segmentColor = 'var(--accent-cyan)';
-    const currentKmh = pt.speed * 3.6;
     
-    if (pt.speedLimit !== null) {
-      if (currentKmh > pt.speedLimit * 1.05) {
-        segmentColor = 'var(--accent-red)';
-      } else if (currentKmh > pt.speedLimit * 0.8) {
-        segmentColor = 'var(--accent-orange)';
-      } else {
-        segmentColor = 'var(--accent-green)';
-      }
+    // Highlight points carrying warning flags or events
+    if (pt.userEvent === 'USER_MARKED') {
+      segmentColor = 'var(--accent-orange)'; // User flagged event
+    } else if (pt.diagnosticAlert !== "") {
+      segmentColor = 'var(--accent-pink)'; // Auto diagnostic alert segment
     } else {
-      if (currentKmh > 80) segmentColor = 'var(--accent-red)';
-      else if (currentKmh > 40) segmentColor = 'var(--accent-orange)';
-      else if (currentKmh > 3) segmentColor = 'var(--accent-green)';
+      const currentKmh = pt.speed * 3.6;
+      if (pt.speedLimit !== null) {
+        if (currentKmh > pt.speedLimit * 1.05) {
+          segmentColor = 'var(--accent-red)';
+        } else if (currentKmh > pt.speedLimit * 0.8) {
+          segmentColor = 'var(--accent-orange)';
+        } else {
+          segmentColor = 'var(--accent-green)';
+        }
+      } else {
+        if (currentKmh > 80) segmentColor = 'var(--accent-red)';
+        else if (currentKmh > 40) segmentColor = 'var(--accent-orange)';
+        else if (currentKmh > 3) segmentColor = 'var(--accent-green)';
+      }
     }
 
     L.polyline([prevLatLng, latLng], {
@@ -884,6 +1024,13 @@ async function loadTripHistory() {
     const speedUnit = settings.units === 'imperial' ? 'mph' : 'km/h';
     const distUnit = settings.units === 'imperial' ? 'mi' : 'km';
     const profileTag = trip.trackingProfile === 'high-res' ? 'DIAGNOSTIC (1s)' : (trip.trackingProfile === 'standard' ? 'LOG (10s)' : 'SMART (15m)');
+    
+    // Count alerts and event markings
+    const alertCount = trip.coords.filter(c => c.diagnosticAlert && c.diagnosticAlert !== "").length;
+    const eventCount = trip.coords.filter(c => c.userEvent && c.userEvent !== "").length;
+    const diagnosticsAlertIndicator = (alertCount > 0 || eventCount > 0) 
+      ? `<span style="font-size: 0.65rem; color: var(--accent-orange); font-weight: 800; margin-left: 10px;">⚠️ ${alertCount} alerts / ${eventCount} events</span>` 
+      : '';
 
     const card = document.createElement('div');
     card.className = 'trip-card';
@@ -893,7 +1040,10 @@ async function loadTripHistory() {
         <span class="trip-date">${trip.date}</span>
         <span class="trip-duration-tag">${formatDuration(trip.duration)}</span>
       </div>
-      <div style="font-size: 0.65rem; color: var(--accent-purple); font-weight: 800; margin-top: -8px;">${profileTag}</div>
+      <div style="font-size: 0.65rem; color: var(--accent-purple); font-weight: 800; margin-top: -8px; display: flex; align-items: center;">
+        <span>${profileTag}</span>
+        ${diagnosticsAlertIndicator}
+      </div>
       <div class="trip-card-stats">
         <div class="trip-card-stat">
           <span class="trip-card-label">DISTANCE</span>
@@ -985,20 +1135,26 @@ function renderModalMap(trip) {
     const prevLatLng = [prevPt.lat, prevPt.lon];
 
     let segmentColor = 'var(--accent-cyan)';
-    const currentKmh = pt.speed * 3.6;
-
-    if (pt.speedLimit !== null) {
-      if (currentKmh > pt.speedLimit * 1.05) {
-        segmentColor = 'var(--accent-red)';
-      } else if (currentKmh > pt.speedLimit * 0.8) {
-        segmentColor = 'var(--accent-orange)';
-      } else {
-        segmentColor = 'var(--accent-green)';
-      }
+    
+    if (pt.userEvent === 'USER_MARKED') {
+      segmentColor = 'var(--accent-orange)';
+    } else if (pt.diagnosticAlert && pt.diagnosticAlert !== "") {
+      segmentColor = 'var(--accent-pink)';
     } else {
-      if (currentKmh > 80) segmentColor = 'var(--accent-red)';
-      else if (currentKmh > 40) segmentColor = 'var(--accent-orange)';
-      else if (currentKmh > 3) segmentColor = 'var(--accent-green)';
+      const currentKmh = pt.speed * 3.6;
+      if (pt.speedLimit !== null) {
+        if (currentKmh > pt.speedLimit * 1.05) {
+          segmentColor = 'var(--accent-red)';
+        } else if (currentKmh > pt.speedLimit * 0.8) {
+          segmentColor = 'var(--accent-orange)';
+        } else {
+          segmentColor = 'var(--accent-green)';
+        }
+      } else {
+        if (currentKmh > 80) segmentColor = 'var(--accent-red)';
+        else if (currentKmh > 40) segmentColor = 'var(--accent-orange)';
+        else if (currentKmh > 3) segmentColor = 'var(--accent-green)';
+      }
     }
 
     L.polyline([prevLatLng, latLng], {
@@ -1130,6 +1286,8 @@ function exportToGPX(trip) {
           <gx>${pt.gx !== undefined ? pt.gx.toFixed(3) : ''}</gx>
           <gy>${pt.gy !== undefined ? pt.gy.toFixed(3) : ''}</gy>
           <gz>${pt.gz !== undefined ? pt.gz.toFixed(3) : ''}</gz>
+          <user_event>${pt.userEvent || ''}</user_event>
+          <diag_alert>${pt.diagnosticAlert || ''}</diag_alert>
         </extensions>
       </trkpt>
 `;
@@ -1147,7 +1305,7 @@ function exportToJSON(trip) {
   downloadFile(jsonStr, `trip_${trip.id}.json`, 'application/json');
 }
 
-// Vehicle Diagnostics Excel-compatible CSV export generator
+// Upgraded vehicle diagnostics CSV export
 function exportToCSV(trip) {
   const speedUnit = settings.units === 'imperial' ? 'mph' : 'km/h';
   const elevUnit = settings.units === 'imperial' ? 'ft' : 'm';
@@ -1159,7 +1317,7 @@ function exportToCSV(trip) {
   csv += `Total Distance (${settings.units === 'imperial' ? 'mi' : 'km'}),${convertDistance(trip.distance).toFixed(3)}\n\n`;
   
   // Tabular column headers
-  csv += `Timestamp,Date,Elapsed_Time_Sec,Speed_${speedUnit},Speed_Limit_${speedUnit},Road_Name,Acceleration_GPS_mps2,Incline_Pct,Altitude_${elevUnit},G_Force_Lateral_X,G_Force_Longitudinal_Y,G_Force_Vertical_Z,G_Force_Vector\n`;
+  csv += `Timestamp,Date,Elapsed_Time_Sec,Speed_${speedUnit},Speed_Limit_${speedUnit},Road_Name,Acceleration_GPS_mps2,Incline_Pct,Altitude_${elevUnit},G_Force_Lateral_X,G_Force_Longitudinal_Y,G_Force_Vertical_Z,G_Force_Vector,User_Event_Flag,Diagnostic_Alert_Flag\n`;
   
   trip.coords.forEach((pt, idx) => {
     const elapsed = Math.round((pt.time - trip.id) / 1000);
@@ -1187,7 +1345,10 @@ function exportToCSV(trip) {
     const gz = pt.gz !== undefined ? pt.gz.toFixed(3) : '1.000';
     const gtotal = pt.gtotal !== undefined ? pt.gtotal.toFixed(3) : '1.000';
     
-    csv += `${pt.time},${dateStr},${elapsed},${speedVal},${speedLimit},${road},${gpsAccel.toFixed(3)},${inclineVal},${elevVal},${gx},${gy},${gz},${gtotal}\n`;
+    const userEv = pt.userEvent || '';
+    const diagAl = pt.diagnosticAlert || '';
+    
+    csv += `${pt.time},${dateStr},${elapsed},${speedVal},${speedLimit},${road},${gpsAccel.toFixed(3)},${inclineVal},${elevVal},${gx},${gy},${gz},${gtotal},${userEv},${diagAl}\n`;
   });
   
   downloadFile(csv, `trip_diagnostics_${trip.id}.csv`, 'text/csv');
@@ -1206,20 +1367,13 @@ function downloadFile(content, fileName, contentType) {
 // App Initialization
 // -------------------------------------------------------------
 window.addEventListener('DOMContentLoaded', async () => {
-  // 1. Setup DB
   await initIndexedDB();
-  
-  // 2. Load History
   await loadTripHistory();
   
-  // 3. Setup Maps & Charts
   initMap();
   initCharts();
-
-  // 4. Setup Accelerometer sensor
   initAccelerometer();
 
-  // 5. Geolocation Engine launch
   if ('geolocation' in navigator) {
     watchId = navigator.geolocation.watchPosition(
       handleGPSUpdate,
@@ -1235,9 +1389,16 @@ window.addEventListener('DOMContentLoaded', async () => {
     alert("Geolocation is required for this application to function.");
   }
 
-  // 6. Button Listeners
+  // Button Listeners
   document.getElementById('track-btn').addEventListener('click', toggleTracking);
   
+  document.getElementById('mark-event-btn').addEventListener('click', () => {
+    if (isTracking) {
+      pendingUserEvent = true;
+      console.log("Flagging next waypoint with USER_MARKED.");
+    }
+  });
+
   document.getElementById('tab-map').addEventListener('click', (e) => {
     document.getElementById('tab-map').classList.add('active');
     document.getElementById('tab-charts').classList.remove('active');

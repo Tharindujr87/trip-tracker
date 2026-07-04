@@ -390,12 +390,12 @@ body {
 }
 
 .crosshair-circle.circle-1 {
-  width: 65px;  /* represents 0.5 G */
+  width: 65px;
   height: 65px;
 }
 
 .crosshair-circle.circle-2 {
-  width: 130px; /* represents 1.0 G */
+  width: 130px;
   height: 130px;
 }
 
@@ -411,6 +411,66 @@ body {
   transform: translate(-50%, -50%);
   transition: all 0.08s ease-out;
   box-shadow: 0 0 10px var(--accent-pink);
+}
+
+/* Dynamic Live Diagnostic Alerts Card */
+.alerts-container {
+  width: 100%;
+  background: rgba(255, 159, 28, 0.08);
+  border: 1px solid rgba(255, 159, 28, 0.25);
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+  animation: slide-down 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 0 16px rgba(255, 159, 28, 0.08);
+}
+
+.alerts-container.hide {
+  display: none;
+}
+
+.alerts-header-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.alerts-header-bar .alert-icon {
+  font-size: 0.95rem;
+  color: var(--accent-orange);
+  animation: pulse-overlay 1s infinite alternate;
+}
+
+.alert-title-text {
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: var(--accent-orange);
+}
+
+.alerts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.alert-item {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #fff;
+  border-left: 2px solid var(--accent-orange);
+  padding-left: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.alert-timestamp {
+  font-size: 0.65rem;
+  color: var(--text-secondary);
 }
 
 /* Dashboard configuration form */
@@ -466,6 +526,22 @@ body {
 .btn-stop:hover {
   transform: translateY(-2px);
   box-shadow: 0 6px 24px rgba(255, 0, 85, 0.5);
+}
+
+/* Diagnostics alert marker button */
+.btn-warning {
+  background: linear-gradient(135deg, var(--accent-orange), #cc7a00);
+  color: #fff;
+  box-shadow: 0 4px 16px rgba(255, 159, 28, 0.3);
+}
+
+.btn-warning:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(255, 159, 28, 0.45);
+}
+
+.btn-warning:active {
+  transform: translateY(0);
 }
 
 .btn-secondary {
