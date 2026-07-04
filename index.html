@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>PWA Motion Tracker</title>
+  
+  <!-- SEO Meta Tags -->
+  <meta name="description" content="Premium real-time PWA motion tracker for recording trips, monitoring speed variations, calculating incline, and warning against speed limits.">
+  <meta name="theme-color" content="#0a0f1d">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/svg+xml" href="icon.svg">
+  <link rel="apple-touch-icon" href="icon.svg">
+
+  <!-- Stylesheets -->
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <link rel="stylesheet" href="index.css">
+</head>
+<body>
+
+  <!-- App Wrapper -->
+  <div class="app-container">
+    
+    <!-- Top Header Bar -->
+    <header class="app-header">
+      <div class="logo-section">
+        <svg class="header-logo" viewBox="0 0 512 512" width="32" height="32">
+          <circle cx="256" cy="256" r="180" fill="none" stroke="#00f2fe" stroke-width="24" stroke-dasharray="800 300" stroke-linecap="round"/>
+          <path d="M256 120 L290 280 L256 250 L222 280 Z" fill="#39ff14"/>
+        </svg>
+        <h1>MOTION<span class="highlight">TRACKER</span></h1>
+      </div>
+      
+      <!-- Status Tags -->
+      <div class="status-tags">
+        <div id="gps-status" class="status-tag offline">
+          <span class="status-dot"></span>
+          <span class="status-text">GPS SEARCHING</span>
+        </div>
+        <div id="wake-status" class="status-tag offline">
+          <span class="status-dot"></span>
+          <span class="status-text">SCREEN SLEEPABLE</span>
+        </div>
+        <button id="pwa-install-btn" class="install-btn" style="display: none;">INSTALL APP</button>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="dashboard-grid">
+      
+      <!-- Left Panel: Speedometer & Controls -->
+      <section class="panel control-panel-section">
+        
+        <!-- Large Speedometer Circular Widget -->
+        <div class="speedometer-container">
+          <svg class="speed-ring-svg" viewBox="0 0 200 200">
+            <!-- Background arc -->
+            <path class="speed-ring-bg" d="M 40 160 A 75 75 0 1 1 160 160" fill="none" stroke-width="12" stroke-linecap="round"></path>
+            <!-- Foreground meter arc -->
+            <path id="speed-progress" class="speed-ring-fill" d="M 40 160 A 75 75 0 1 1 160 160" fill="none" stroke-width="12" stroke-linecap="round" stroke-dasharray="353" stroke-dashoffset="353"></path>
+          </svg>
+
+          <!-- Inside Speedometer Content -->
+          <div class="speedometer-content">
+            <div id="current-speed" class="speed-val">0</div>
+            <div id="speed-unit-label" class="speed-unit">km/h</div>
+            
+            <!-- Road Speed Limit Display -->
+            <div id="speed-limit-display" class="speed-limit-box hide">
+              <span class="limit-title">ROAD LIMIT</span>
+              <span id="speed-limit-val" class="limit-val">--</span>
+            </div>
+          </div>
+
+          <!-- Speeding Indicator Overlay -->
+          <div id="speeding-warning" class="speeding-overlay hide">SLOW DOWN</div>
+        </div>
+
+        <!-- Mode Configuration and Controls -->
+        <div class="controls-card">
+          <!-- Primary Action Buttons -->
+          <div class="btn-group">
+            <button id="track-btn" class="btn btn-primary btn-start">
+              <span class="btn-icon">▶</span>
+              <span class="btn-text">START TRIP</span>
+            </button>
+          </div>
+
+          <!-- Configuration Switches -->
+          <div class="settings-grid">
+            <div class="settings-row">
+              <label for="wake-lock-toggle">Keep Screen Awake</label>
+              <label class="switch">
+                <input type="checkbox" id="wake-lock-toggle" checked>
+                <span class="slider"></span>
+              </label>
+            </div>
+            
+            <div class="settings-row">
+              <label for="auto-start-toggle">Auto-Start Trip</label>
+              <label class="switch">
+                <input type="checkbox" id="auto-start-toggle">
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="settings-row indent-setting" id="auto-speed-row" style="display: none;">
+              <label for="auto-speed-val">Threshold Speed</label>
+              <select id="auto-speed-val" class="select-box">
+                <option value="5">5 km/h (Walking/Vehicular)</option>
+                <option value="10" selected>10 km/h (Cycling/Slow Vehicle)</option>
+                <option value="20">20 km/h (Regular Driving)</option>
+              </select>
+            </div>
+
+            <div class="settings-row">
+              <label for="units-toggle">Unit System</label>
+              <select id="units-toggle" class="select-box">
+                <option value="metric" selected>Metric (km/h, meters)</option>
+                <option value="imperial">Imperial (mph, feet)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right Panel: Live Stats Cards & Dynamic Graph Panels -->
+      <section class="panel stats-charts-section">
+        
+        <!-- Live Stat Cards Grid -->
+        <div class="stats-grid">
+          
+          <div class="stat-card">
+            <div class="stat-header">
+              <span class="stat-label">DURATION</span>
+              <span class="stat-icon">⏱</span>
+            </div>
+            <div id="stat-duration" class="stat-value">00:00:00</div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-header">
+              <span class="stat-label">DISTANCE</span>
+              <span class="stat-icon">📏</span>
+            </div>
+            <div id="stat-distance" class="stat-value">0.00 <span class="sub-unit">km</span></div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-header">
+              <span class="stat-label">AVG SPEED</span>
+              <span class="stat-icon">📈</span>
+            </div>
+            <div id="stat-avg-speed" class="stat-value">0.0 <span class="sub-unit">km/h</span></div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-header">
+              <span class="stat-label">MAX SPEED</span>
+              <span class="stat-icon">⚡</span>
+            </div>
+            <div id="stat-max-speed" class="stat-value">0.0 <span class="sub-unit">km/h</span></div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-header">
+              <span class="stat-label">INCLINE</span>
+              <span class="stat-icon">⛰</span>
+            </div>
+            <div id="stat-incline" class="stat-value">0.0 <span class="sub-unit">%</span></div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-header">
+              <span class="stat-label">ELEVATION GAIN</span>
+              <span class="stat-icon">⏶</span>
+            </div>
+            <div id="stat-elevation" class="stat-value">0 <span class="sub-unit">m</span></div>
+          </div>
+        </div>
+
+        <!-- Dynamic Visualization Tabs (Map / Charts) -->
+        <div class="visualizer-container">
+          <div class="tab-header">
+            <button id="tab-map" class="tab-btn active">ROUTE MAP</button>
+            <button id="tab-charts" class="tab-btn">TELEMETRY CHARTS</button>
+          </div>
+          
+          <div class="tab-content-wrapper">
+            <!-- Map Container -->
+            <div id="map-container" class="tab-content active">
+              <div id="map"></div>
+            </div>
+
+            <!-- Charts Container -->
+            <div id="charts-container" class="tab-content">
+              <div class="chart-wrapper">
+                <canvas id="telemetryChart"></canvas>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </section>
+
+    </main>
+
+    <!-- Lower Section: Trip History -->
+    <section class="panel trip-history-section">
+      <div class="section-title-bar">
+        <h2>TRIP HISTORY</h2>
+        <span class="history-count" id="history-count">0 SAVED TRIPS</span>
+      </div>
+
+      <!-- History Cards Container -->
+      <div class="history-list" id="history-list">
+        <div class="empty-history">
+          <p>No trips recorded yet. Start moving or hit Start Trip to log data!</p>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- Trip Detail Modal -->
+  <div id="trip-modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modal-trip-title">Trip Details</h3>
+        <button id="modal-close" class="close-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        
+        <!-- Summary Dashboard Inside Modal -->
+        <div class="modal-summary-grid">
+          <div class="m-card"><strong>Distance:</strong> <span id="m-distance">0.00 km</span></div>
+          <div class="m-card"><strong>Duration:</strong> <span id="m-duration">00:00:00</span></div>
+          <div class="m-card"><strong>Avg/Max Speed:</strong> <span id="m-speeds">0.0 / 0.0 km/h</span></div>
+          <div class="m-card"><strong>Elev. Gain / Incline:</strong> <span id="m-elevation">0 m / 0%</span></div>
+        </div>
+
+        <div class="modal-visualization">
+          <div id="modal-map"></div>
+          <div class="modal-chart-container">
+            <canvas id="modalChart"></canvas>
+          </div>
+        </div>
+
+        <!-- Export Buttons -->
+        <div class="modal-footer">
+          <button id="export-gpx-btn" class="btn btn-secondary">
+            <span class="btn-icon">💾</span> EXPORT GPX
+          </button>
+          <button id="export-json-btn" class="btn btn-secondary">
+            <span class="btn-icon">📋</span> EXPORT JSON
+          </button>
+          <button id="delete-trip-btn" class="btn btn-danger">
+            <span class="btn-icon">🗑</span> DELETE TRIP
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- External Library Dependencies -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- Core Logic -->
+  <script src="app.js"></script>
+</body>
+</html>
